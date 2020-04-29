@@ -92,6 +92,11 @@ flags.DEFINE_string(
     "The imported files should contain registrations, "
     "e.g. @registry.register_problem calls, that will then be "
     "available to t2t-datagen.")
+flags.DEFINE_string("input_path", "", "Input path")
+flags.DEFINE_integer("parallel", 0, "Use parallel")
+flags.DEFINE_string("vocab", "", "Vocabulary path")
+flags.DEFINE_integer("vocab_size", 65536, "Vocabulary size")
+flags.DEFINE_integer("max_seq_len", -1, "Max sequence length")
 
 # Mapping from problems that we can generate data for to their generators.
 # pylint: disable=g-long-lambda

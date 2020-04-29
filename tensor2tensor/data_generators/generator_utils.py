@@ -137,6 +137,7 @@ def outputs_exist(filenames):
     out_fname = out_fname.replace(UNSHUFFLED_SUFFIX, "")
     if tf.gfile.Exists(out_fname):
       return out_fname
+  return None
 
 
 def generate_files(generator, output_filenames,
@@ -155,6 +156,7 @@ def generate_files(generator, output_filenames,
       switching to the next shard; by default set to 1, switch every case.
   """
   if outputs_exist(output_filenames):
+    print(output_filenames)
     tf.logging.info("Skipping generator because outputs files exists at {}"
                     .format(output_filenames))
     return
