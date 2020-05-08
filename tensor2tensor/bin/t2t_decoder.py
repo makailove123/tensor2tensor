@@ -33,6 +33,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import base64
 from tensor2tensor.bin import t2t_trainer
 from tensor2tensor.data_generators import problem  # pylint: disable=unused-import
 from tensor2tensor.data_generators import text_encoder
@@ -40,6 +41,7 @@ from tensor2tensor.utils import decoding
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 from tensor2tensor.utils import usr_dir
+import numpy as np
 
 import tensorflow.compat.v1 as tf
 
@@ -170,6 +172,62 @@ def score_file(filename):
   return results
 
 
+def score_file_2(filename):
+  """Score each line in a file and return the scores."""
+  # Prepare model.
+  hparams = create_hparams()
+  hparams.layer_prepostprocess_dropout = 0.0
+  encoders = registry.problem(FLAGS.problem).feature_encoders(FLAGS.data_dir)
+
+  # Prepare features for feeding into the model.
+  inputs_ph = tf.placeholder(dtype=tf.int32)  # Just length dimension.
+  batch_inputs = tf.reshape(inputs_ph, [1, -1, 1, 1])  # Make it 4D.
+  targets_ph = tf.placeholder(dtype=tf.int32)  # Just length dimension.
+  batch_targets = tf.reshape(targets_ph, [1, -1, 1, 1])  # Make it 4D.
+  features = {"inputs": batch_inputs, "targets": batch_targets}
+
+  # Prepare the model and the graph when model runs on features.
+  model = registry.model(FLAGS.model)(hparams, tf.estimator.ModeKeys.PREDICT)
+  encoder_output, _ = model(features)
+  print("----------------", encoder_output.shape)
+  saver = tf.train.Saver()
+
+  with tf.Session() as sess:
+    # Load weights from checkpoint.
+    if FLAGS.checkpoint_path is None:
+      ckpts = tf.train.get_checkpoint_state(FLAGS.output_dir)
+      ckpt = ckpts.model_checkpoint_path
+    else:
+      ckpt = FLAGS.checkpoint_path
+    saver.restore(sess, ckpt)
+    # Run on each line.
+    with tf.gfile.Open(filename) as f:
+      lines = f.readlines()
+    results = []
+    for line in lines:
+      tab_split = line.split("\t")
+      if len(tab_split) < 2:
+        raise ValueError("Each line must have at most one tab separator.")
+      targets = tab_split[1].strip()
+      inputs = tab_split[0].strip()
+      # Run encoders and append EOS symbol.
+      inputs_numpy = encoders["inputs"].encode(inputs)[:256] + [text_encoder.EOS_ID]
+      targets_numpy = encoders["inputs"].encode(targets)[:256] + [text_encoder.EOS_ID]
+      print("l1:", len(inputs_numpy), "l2:", len(targets_numpy), "EOS:", inputs_numpy[-1])
+      feed = {inputs_ph: inputs_numpy, targets_ph: targets_numpy}
+      input_emb = sess.run(encoder_output, feed)
+      print(input_emb.shape)
+      print(input_emb)
+      v = np.zeros(512)
+      for i in range(len(inputs_numpy)):
+        if inputs_numpy[i] <= 1:
+          continue
+        v += input_emb[0][i][0]
+      v = v / np.linalg.norm(v)
+      print((",".join("{:.4g}".format(i) for i in v)))
+  return results
+
+
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
   trainer_lib.set_random_seed(FLAGS.random_seed)
@@ -180,7 +238,7 @@ def main(_):
     filename = os.path.expanduser(FLAGS.score_file)
     if not tf.gfile.Exists(filename):
       raise ValueError("The file to score doesn't exist: %s" % filename)
-    results = score_file(filename)
+    results = score_file_2(filename)
     if not FLAGS.decode_to_file:
       raise ValueError("To score a file, specify --decode_to_file for results.")
     write_file = tf.gfile.Open(os.path.expanduser(FLAGS.decode_to_file), "w")

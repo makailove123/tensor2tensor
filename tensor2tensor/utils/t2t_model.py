@@ -62,6 +62,13 @@ _no_problem_err = (
     lambda method_name: _no_problem_err_str % (method_name, method_name))
 
 
+def _remove_summaries():
+  g = tf.get_default_graph()
+  key = tf.GraphKeys.SUMMARIES
+  del g.get_collection_ref(key)[:]
+  assert not g.get_collection(key)
+
+
 def _flatten_dict(original_dict):
   """Flatten dict of dicts into a single dict with appropriate prefixes.
 
@@ -439,7 +446,6 @@ class T2TModel(base.Layer):
         if (self._hparams.mode != tf.estimator.ModeKeys.PREDICT and
             self._hparams.mode != "attack"):
           losses["training"] = self.loss(logits, features)
-
       return logits, losses
 
   def bottom(self, features):
@@ -1694,27 +1700,28 @@ class T2TModel(base.Layer):
   def estimator_spec_predict(self, features, use_tpu=False):
     """Constructs `tf.estimator.EstimatorSpec` for PREDICT (inference) mode."""
     decode_hparams = self._decode_hparams
-    top_beams = decode_hparams.beam_size if decode_hparams.return_beams else 1
     infer_out = self.infer(
         features,
         beam_size=decode_hparams.beam_size,
-        top_beams=top_beams,
+        top_beams=(decode_hparams.beam_size
+                   if decode_hparams.return_beams else 1),
         alpha=decode_hparams.alpha,
         decode_length=decode_hparams.extra_length,
         use_tpu=use_tpu)
     if isinstance(infer_out, dict):
       outputs = infer_out["outputs"]
+      outputs2 = None
+      outputs3 = None
+      if decode_hparams.decode_mode == 1 or decode_hparams.decode_mode == 3:
+        outputs2 = infer_out["outputs2"]
+      if decode_hparams.decode_mode == 3:
+        outputs3 = infer_out["outputs3"]
       scores = infer_out["scores"]
     else:
       outputs = infer_out
+      outputs2 = None
+      outputs3 = None
       scores = None
-
-    # Workaround for "ValueError: prediction values must be from the default
-    # graph" during TPU model exporting.
-    # TODO(b/130501786): remove tf.identity once default graph mismatch is fixed
-    if use_tpu:
-      for name, feature in features.items():
-        features[name] = tf.identity(feature)
 
     inputs = features.get("inputs")
     if inputs is None:
@@ -1722,6 +1729,8 @@ class T2TModel(base.Layer):
 
     predictions = {
         "outputs": outputs,
+        "outputs2": outputs2,
+        "outputs3": outputs3,
         "scores": scores,
         "inputs": inputs,
         "targets": features.get("infer_targets"),
@@ -1730,8 +1739,6 @@ class T2TModel(base.Layer):
     # Pass through remaining features
     for name, feature in features.items():
       if name not in list(predictions.keys()) + ["infer_targets"]:
-        if name == "decode_loop_step":
-          continue
         if not feature.shape.as_list():
           # All features must have a batch dimension
           batch_size = common_layers.shape_list(outputs)[0]
@@ -1744,32 +1751,21 @@ class T2TModel(base.Layer):
     if "scores" in predictions:
       export_out["scores"] = predictions["scores"]
 
-    if decode_hparams.get("export_extra_infer_outputs"):
-      for output in decode_hparams.export_extra_infer_outputs.split(","):
-        export_out[output] = infer_out[output]
-
     # Necessary to rejoin examples in the correct order with the Cloud ML Engine
     # batch prediction API.
     if "batch_prediction_key" in predictions:
       export_out["batch_prediction_key"] = predictions["batch_prediction_key"]
+
+    _remove_summaries()
 
     export_outputs = {
         tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY:
             tf.estimator.export.PredictOutput(export_out)
     }
     if use_tpu:
-      # Note: important to call this before remove_summaries()
-      if self.hparams.tpu_enable_host_call:
-        host_call = self.create_eval_host_call()
-      else:
-        host_call = None
-
-      remove_summaries()
-
-      return contrib.tpu().TPUEstimatorSpec(
+      return tf.contrib.tpu.TPUEstimatorSpec(
           tf.estimator.ModeKeys.PREDICT,
           predictions=predictions,
-          host_call=host_call,
           export_outputs=export_outputs)
     else:
       return tf.estimator.EstimatorSpec(

@@ -24,6 +24,10 @@ import os
 import re
 import string
 import time
+import base64
+import math
+import scipy.spatial.distance as sd
+from scipy.special import logit, expit
 
 import numpy as np
 import six
@@ -48,6 +52,7 @@ IMAGE_DECODE_LENGTH = 100
 def decode_hparams(overrides=""):
   """Hyperparameters for decoding."""
   hp = hparam.HParams(
+      decode_mode=0,
       save_images=False,
       log_results=True,
       extra_length=100,
@@ -254,30 +259,7 @@ def decode_once(estimator,
                 output_dir,
                 log_results=True,
                 checkpoint_path=None):
-  """Decodes once.
-
-  Args:
-    estimator: tf.estimator.Estimator instance. Used to generate encoded
-      predictions.
-    problem_name: str. Name of problem.
-    hparams: HParams instance. HParams for model training.
-    infer_input_fn: zero-arg function. Input function for estimator.
-    decode_hp: HParams instance. See decode_hparams() above.
-    decode_to_file: str. Prefix for filenames. Used to generated filenames to
-      which decoded predictions are written.
-    output_dir: str. Output directory. Only used for writing images.
-    log_results: bool. If False, return encoded predictions without any
-      further processing.
-    checkpoint_path: str. Path to load model checkpoint from. If unspecified,
-      Estimator's default is used.
-
-  Returns:
-    If decode_hp.decode_in_memory is True:
-      List of dicts, one per example. Values are either numpy arrays or decoded
-      strings.
-    If decode_hp.decode_in_memory is False:
-      An empty list.
-  """
+  """Decodes once."""
 
   # Get the predictions as an iterable
   predictions = estimator.predict(infer_input_fn,
@@ -289,16 +271,21 @@ def decode_once(estimator,
   # Prepare output file writers if decode_to_file passed
   decode_to_file = decode_to_file or decode_hp.decode_to_file
   if decode_to_file:
-    output_filepath = _decode_filename(decode_to_file, problem_name, decode_hp)
-    parts = output_filepath.split(".")
-    parts[-1] = "targets"
-    target_filepath = ".".join(parts)
-    parts[-1] = "inputs"
-    input_filepath = ".".join(parts)
+    if decode_hp.shards > 1:
+      decode_filename = decode_to_file + ("%.2d" % decode_hp.shard_id)
+    else:
+      decode_filename = decode_to_file
+    #output_filepath = _decode_filename(decode_filename, problem_name, decode_hp)
+    #parts = output_filepath.split(".")
+    #parts[-1] = "targets"
+    #target_filepath = ".".join(parts)
+    #parts[-1] = "inputs"
+    #input_filepath = ".".join(parts)
 
-    output_file = tf.gfile.Open(output_filepath, "w")
-    target_file = tf.gfile.Open(target_filepath, "w")
-    input_file = tf.gfile.Open(input_filepath, "w")
+    #output_file = tf.gfile.Open(output_filepath, "w")
+    #target_file = tf.gfile.Open(target_filepath, "w")
+    #input_file = tf.gfile.Open(input_filepath, "w")
+    output_file = tf.gfile.Open(decode_filename, "w")
 
   problem_hparams = hparams.problem_hparams
   # Inputs vocabulary is set to targets if there are no inputs in the problem,
@@ -308,90 +295,92 @@ def decode_once(estimator,
   inputs_vocab = problem_hparams.vocabulary[inputs_vocab_key]
   targets_vocab = problem_hparams.vocabulary["targets"]
 
-  num_eval_samples = 0
-
-  # all_outputs[i][j] = (input: str, output: str, target: str). Input,
-  # decoded output, and target strings for example i, beam rank j.
-  all_outputs = []
   for num_predictions, prediction in enumerate(predictions):
-    num_eval_samples += 1
-    num_predictions += 1
-    inputs = prediction.get("inputs")
-    targets = prediction.get("targets")
-    outputs = prediction.get("outputs")
-
-    # Log predictions
-    decoded_outputs = []  # [(str, str, str)]. See all_outputs above.
-    if decode_hp.decode_in_memory:
-      all_outputs.append(decoded_outputs)
-    decoded_scores = []
-
-    if decode_hp.return_beams:
-      output_beams = np.split(outputs, decode_hp.beam_size, axis=0)
-      scores = None
-      if "scores" in prediction:
-        scores = np.split(prediction["scores"], decode_hp.beam_size, axis=0)
-      for i, beam in enumerate(output_beams):
-        tf.logging.info("BEAM %d:" % i)
-        score = scores and scores[i]
-        decoded = log_decode_results(
-            inputs,
-            beam,
-            problem_name,
-            num_predictions,
-            inputs_vocab,
-            targets_vocab,
-            save_images=decode_hp.save_images,
-            output_dir=output_dir,
-            identity_output=decode_hp.identity_output,
-            targets=targets,
-            log_results=log_results)
-        decoded_outputs.append(decoded)
-        if decode_hp.write_beam_scores:
-          decoded_scores.append(score)
-    else:
-      decoded = log_decode_results(
-          inputs,
-          outputs,
-          problem_name,
-          num_predictions,
-          inputs_vocab,
-          targets_vocab,
-          save_images=decode_hp.save_images,
-          output_dir=output_dir,
-          identity_output=decode_hp.identity_output,
-          targets=targets,
-          log_results=log_results,
-          skip_eos_postprocess=decode_hp.skip_eos_postprocess)
-      decoded_outputs.append(decoded)
-
-    # Write out predictions if decode_to_file passed
+    decoded_inputs = inputs_vocab.decode(_save_until_eos(prediction["inputs"], False))
     if decode_to_file:
-      for i, (d_input, d_output, d_target) in enumerate(decoded_outputs):
-        # Skip if all padding
-        if d_input and re.match("^({})+$".format(text_encoder.PAD), d_input):
-          continue
-        beam_score_str = ""
-        if decode_hp.write_beam_scores:
-          beam_score_str = "\t%.2f" % decoded_scores[i]
-        output_file.write(str(d_output) + beam_score_str + decode_hp.delimiter)
-        target_file.write(str(d_target) + decode_hp.delimiter)
-        input_file.write(str(d_input) + decode_hp.delimiter)
+      if decode_hp.decode_mode == 1:
+        output_file.write(decoded_inputs + "\t" + base64.b64encode(prediction["outputs"]) + "\t" + base64.b64encode(prediction["outputs2"]) + "\n")
+      elif decode_hp.decode_mode == 2:
+        output_file.write(decoded_inputs + "\t" + base64.b64encode(prediction["outputs"]).decode("utf-8") + "\n")
+      elif decode_hp.decode_mode == 3:
+        decoded_targets = inputs_vocab.decode(_save_until_eos(prediction["targets"], False))
+        cos = 1.0 - sd.cosine(prediction["outputs2"], prediction["outputs3"])
+        if cos > 1.0: 
+          cos = 1.0
+        weight = 1.0 - (math.acos(cos) / math.pi)
+        output_file.write(decoded_inputs + "\t" + decoded_targets + "\t" + str(weight) + "\n")
+        #output_file.write(decoded_inputs + "\t" + decoded_targets + "\t" + base64.b64encode(prediction["outputs"]) + "\t" + base64.b64encode(prediction["outputs2"]) + "\t" + base64.b64encode(prediction["outputs3"]) + "\n")
+      #print(decoded_inputs)
+      ##print(prediction["outputs3"])
+      #print(prediction)
+    else:
+      print(decoded_inputs)
+      print(prediction["outputs"])
+    num_predictions += 1
 
-    if (decode_hp.num_samples >= 0 and
-        num_predictions >= decode_hp.num_samples):
-      break
-
-  mlperf_log.transformer_print(key=mlperf_log.EVAL_SIZE,
-                               value=num_eval_samples,
-                               hparams=hparams)
+#    inputs = prediction["inputs"]
+#    targets = prediction["targets"]
+#    outputs = prediction["outputs"]
+#
+#    # Log predictions
+#    decoded_outputs = []
+#    decoded_scores = []
+#    if decode_hp.return_beams:
+#      output_beams = np.split(outputs, decode_hp.beam_size, axis=0)
+#      scores = None
+#      if "scores" in prediction:
+#        scores = np.split(prediction["scores"], decode_hp.beam_size, axis=0)
+#      for i, beam in enumerate(output_beams):
+#        tf.logging.info("BEAM %d:" % i)
+#        score = scores and scores[i]
+#        decoded = log_decode_results(
+#            inputs,
+#            beam,
+#            problem_name,
+#            num_predictions,
+#            inputs_vocab,
+#            targets_vocab,
+#            save_images=decode_hp.save_images,
+#            output_dir=output_dir,
+#            identity_output=decode_hp.identity_output,
+#            targets=targets,
+#            log_results=decode_hp.log_results)
+#        decoded_outputs.append(decoded)
+#        if decode_hp.write_beam_scores:
+#          decoded_scores.append(score)
+#    else:
+#      decoded = log_decode_results(
+#          inputs,
+#          outputs,
+#          problem_name,
+#          num_predictions,
+#          inputs_vocab,
+#          targets_vocab,
+#          save_images=decode_hp.save_images,
+#          output_dir=output_dir,
+#          identity_output=decode_hp.identity_output,
+#          targets=targets,
+#          log_results=decode_hp.log_results)
+#      decoded_outputs.append(decoded)
+#
+#    # Write out predictions if decode_to_file passed
+#    if decode_to_file:
+#      for i, (d_input, d_output, d_target) in enumerate(decoded_outputs):
+#        beam_score_str = ""
+#        if decode_hp.write_beam_scores:
+#          beam_score_str = "\t%.2f" % decoded_scores[i]
+#        output_file.write(str(d_output) + beam_score_str + decode_hp.delimiter)
+#        #target_file.write(str(d_target) + decode_hp.delimiter)
+#        #input_file.write(str(d_input) + decode_hp.delimiter)
+#
+#    if (decode_hp.num_samples >= 0 and
+#        num_predictions >= decode_hp.num_samples):
+#      break
 
   if decode_to_file:
     output_file.close()
-    target_file.close()
-    input_file.close()
-
-  return all_outputs
+    #target_file.close()
+    #input_file.close()
 
 
 def decode_from_file(estimator,

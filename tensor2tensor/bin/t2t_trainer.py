@@ -150,6 +150,8 @@ flags.DEFINE_bool("gpu_automatic_mixed_precision", False,
 flags.DEFINE_string("vocab", "", "Vocabulary path")
 flags.DEFINE_integer("vocab_size", 65536, "Vocabulary size")
 
+flags.DEFINE_bool("only_encode", False, "Only encode")
+
 def set_hparams_from_args(args):
   """Set hparams overrides from unparsed args list."""
   if not args:
