@@ -479,6 +479,11 @@ class Problem(object):
     Returns:
       filepattern str
     """
+    if not os.path.isdir(data_dir):
+        ret = data_dir.split(",")
+        if len(ret) > 1:
+            return ret
+        return data_dir
     path = os.path.join(data_dir, self.dataset_filename())
     shard_str = "-%05d" % shard if shard is not None else ""
     if mode == DatasetSplit.TRAIN:
